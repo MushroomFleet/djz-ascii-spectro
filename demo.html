@@ -1,0 +1,1178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DJZ-ASCII-SPECTRO · standalone demo</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #f4f1ea;
+    min-height: 100%;
+  }
+  body {
+    font-family: 'IBM Plex Sans Condensed', -apple-system, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  /* Boot screen — appears while Babel compiles the JSX in-browser. */
+  #boot {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    background: #f4f1ea;
+    color: #0e0e0c;
+    font-family: 'Space Mono', ui-monospace, Menlo, monospace;
+    z-index: 9999;
+    transition: opacity 280ms ease-out;
+  }
+  #boot.fade { opacity: 0; pointer-events: none; }
+  #boot .mark {
+    font-size: 11px;
+    letter-spacing: 0.22em;
+    font-weight: 700;
+    color: rgba(14,14,12,0.6);
+  }
+  #boot .title {
+    font-size: clamp(2rem, 5vw, 3rem);
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    line-height: 1;
+  }
+  #boot .status {
+    font-size: 11px;
+    letter-spacing: 0.22em;
+    font-weight: 700;
+    color: #d8412f;
+  }
+  #boot .rule {
+    width: 200px;
+    height: 2px;
+    background: #0e0e0c;
+  }
+</style>
+</head>
+<body>
+  <div id="boot">
+    <div class="mark">NO. ASR-10 / II</div>
+    <div class="rule"></div>
+    <div class="title">ASCII Spectrograph</div>
+    <div class="status">COMPILING…</div>
+  </div>
+  <div id="root"></div>
+
+  <!-- React 18 + Babel Standalone (cdnjs is whitelisted) -->
+  <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+  <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+  <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.25.6/babel.min.js"></script>
+
+  <script type="text/babel" data-presets="react">
+    const { useState, useEffect, useRef, useCallback } = React;
+
+
+// ============================================================================
+// DJZ-ASCII-SPECTRO
+// ----------------------------------------------------------------------------
+// Swiss-instrument redesign of the ASCII waveform display. Bone paper / ink.
+// Asymmetric plate-and-ledger composition. Adds MP3 ingestion via the Web
+// Audio API: a decoded buffer is played through an AnalyserNode whose
+// time-domain output drives the same ampToRow mapping used by the test
+// generators. Test tones remain available as a fallback signal source.
+// ============================================================================
+
+const ROWS = 10;
+const COLS = 110;
+const FRAME_MS = 50;
+const SAMPLE_WINDOW = 8;
+const RAMP = ['█', '▓', '▒', '░', '·', ' ', ' ', ' ', ' ', ' '];
+
+const ampToRow = (amp) => {
+  const c = Math.max(-1, Math.min(1, amp));
+  return Math.round(((1 - c) / 2) * (ROWS - 1));
+};
+
+const renderColumn = (waveRow) => {
+  const out = new Array(ROWS);
+  for (let r = 0; r < ROWS; r++) {
+    const dist = Math.abs(r - waveRow);
+    out[r] = RAMP[Math.min(dist, RAMP.length - 1)];
+  }
+  return out;
+};
+
+// -- Test signals (unchanged from prior version, kept for fallback testing) --
+const TONES = [
+  { id: 'sine',     label: 'SINE 2',     type: 'sine',     freq: 2 },
+  { id: 'square',   label: 'SQR 3',      type: 'square',   freq: 3 },
+  { id: 'saw',      label: 'SAW 3',      type: 'sawtooth', freq: 3 },
+  { id: 'triangle', label: 'TRI 4',      type: 'triangle', freq: 4 },
+  { id: 'beat',     label: 'BEAT',       type: 'beat',     freq: 5 },
+  { id: 'sweep',    label: 'CHIRP',      type: 'sweep',    freq: 0 },
+  { id: 'noise',    label: 'NOISE',      type: 'noise',    freq: 0 },
+];
+
+const sampleAt = (tone, t) => {
+  const T = Math.PI * 2;
+  switch (tone.type) {
+    case 'sine':     return Math.sin(T * tone.freq * t);
+    case 'square':   return Math.sin(T * tone.freq * t) >= 0 ? 0.85 : -0.85;
+    case 'sawtooth': { const p = (t * tone.freq) % 1; return p * 2 - 1; }
+    case 'triangle': { const p = (t * tone.freq) % 1; return p < 0.5 ? p * 4 - 1 : 3 - p * 4; }
+    case 'beat':     return 0.5 * (Math.sin(T * 5 * t) + Math.sin(T * 5.5 * t));
+    case 'sweep': {
+      const u = ((t % 4) / 4); const f = 1 + u * 7;
+      return Math.sin(T * f * t);
+    }
+    case 'noise':    return Math.sin(t * 12345.678) * Math.sin(t * 98765.43);
+    default: return 0;
+  }
+};
+
+// Source modes
+const SRC_TONE = 'tone';
+const SRC_FILE = 'file';
+
+const formatTime = (s) => {
+  if (!isFinite(s) || s < 0) s = 0;
+  const m = Math.floor(s / 60);
+  const sec = Math.floor(s % 60);
+  return `${m.toString().padStart(2, '0')}:${sec.toString().padStart(2, '0')}`;
+};
+
+function DjzAsciiSpectro() {
+  // Source state
+  const [source, setSource] = useState(SRC_TONE);
+  const [toneId, setToneId] = useState('sine');
+  const [running, setRunning] = useState(true);
+
+  // File / playback state
+  const [fileName, setFileName] = useState(null);
+  const [duration, setDuration] = useState(0);
+  const [position, setPosition] = useState(0);
+  const [playing, setPlaying] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [errorMsg, setErrorMsg] = useState(null);
+
+  // Live amplitude readout (for the numeric anchor)
+  const [peakAmp, setPeakAmp] = useState(0);
+
+  // Grid
+  const gridRef = useRef(
+    Array.from({ length: ROWS }, () => new Array(COLS).fill(' '))
+  );
+  const [tick, setTick] = useState(0);
+
+  // Audio plumbing
+  const audioCtxRef = useRef(null);
+  const masterGainRef = useRef(null);
+  const oscRef = useRef(null);             // for tone-mode audio out
+  const decodedBufferRef = useRef(null);   // AudioBuffer for file playback
+  const sourceNodeRef = useRef(null);      // AudioBufferSourceNode (one-shot)
+  const analyserRef = useRef(null);
+  const analyserBufferRef = useRef(null);
+  const playStartCtxTimeRef = useRef(0);   // ctx.currentTime when play started
+  const playStartOffsetRef = useRef(0);    // seek offset within buffer
+
+  const tone = TONES.find((t) => t.id === toneId);
+
+  // -- Audio context lazy init -----------------------------------------------
+  const ensureCtx = useCallback(() => {
+    if (audioCtxRef.current) return audioCtxRef.current;
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    const ctx = new Ctx();
+    const master = ctx.createGain();
+    master.gain.value = 0.9;
+    const an = ctx.createAnalyser();
+    an.fftSize = 2048;
+    an.smoothingTimeConstant = 0.0; // we want raw time-domain samples
+    master.connect(an);
+    an.connect(ctx.destination);
+    audioCtxRef.current = ctx;
+    masterGainRef.current = master;
+    analyserRef.current = an;
+    analyserBufferRef.current = new Float32Array(an.fftSize);
+    return ctx;
+  }, []);
+
+  // -- File ingestion --------------------------------------------------------
+  const onFileChosen = useCallback(async (file) => {
+    if (!file) return;
+    setErrorMsg(null);
+    setLoading(true);
+    setFileName(file.name);
+    try {
+      const ctx = ensureCtx();
+      if (ctx.state === 'suspended') await ctx.resume();
+      const arrayBuf = await file.arrayBuffer();
+      const decoded = await new Promise((resolve, reject) => {
+        // Using callback form for Safari compatibility
+        ctx.decodeAudioData(arrayBuf.slice(0), resolve, reject);
+      });
+      decodedBufferRef.current = decoded;
+      setDuration(decoded.duration);
+      setPosition(0);
+      setPlaying(false);
+      setSource(SRC_FILE);
+    } catch (err) {
+      setErrorMsg('Could not decode this file.');
+      decodedBufferRef.current = null;
+      setDuration(0);
+    } finally {
+      setLoading(false);
+    }
+  }, [ensureCtx]);
+
+  // Stop currently playing buffer source (file mode)
+  const stopBufferSource = useCallback(() => {
+    if (sourceNodeRef.current) {
+      try { sourceNodeRef.current.stop(); } catch (e) {}
+      try { sourceNodeRef.current.disconnect(); } catch (e) {}
+      sourceNodeRef.current = null;
+    }
+  }, []);
+
+  // Start (or restart from offset) the buffer source
+  const startBufferSource = useCallback((offsetSec) => {
+    const ctx = audioCtxRef.current;
+    const buf = decodedBufferRef.current;
+    if (!ctx || !buf || !analyserRef.current) return;
+    stopBufferSource();
+    const node = ctx.createBufferSource();
+    node.buffer = buf;
+    node.connect(analyserRef.current);
+    // Note: analyser already routes to destination via masterGain in ensureCtx
+    node.onended = () => {
+      // Only react if this node is still the active one (avoid race on seek)
+      if (sourceNodeRef.current === node) {
+        sourceNodeRef.current = null;
+        setPlaying(false);
+        // If we ran past the end naturally, snap position to duration
+        const elapsed = ctx.currentTime - playStartCtxTimeRef.current;
+        const final = playStartOffsetRef.current + elapsed;
+        if (final >= buf.duration - 0.05) setPosition(buf.duration);
+      }
+    };
+    playStartCtxTimeRef.current = ctx.currentTime;
+    playStartOffsetRef.current = offsetSec;
+    node.start(0, offsetSec);
+    sourceNodeRef.current = node;
+  }, [stopBufferSource]);
+
+  const togglePlay = useCallback(async () => {
+    if (source !== SRC_FILE || !decodedBufferRef.current) return;
+    const ctx = ensureCtx();
+    if (ctx.state === 'suspended') await ctx.resume();
+    if (playing) {
+      // Pause: capture position, stop node
+      const elapsed = ctx.currentTime - playStartCtxTimeRef.current;
+      const newPos = Math.min(
+        playStartOffsetRef.current + elapsed,
+        decodedBufferRef.current.duration
+      );
+      setPosition(newPos);
+      stopBufferSource();
+      setPlaying(false);
+    } else {
+      // Resume from current position (or restart if at end)
+      const buf = decodedBufferRef.current;
+      const startFrom = position >= buf.duration - 0.01 ? 0 : position;
+      startBufferSource(startFrom);
+      setPlaying(true);
+    }
+  }, [playing, position, source, ensureCtx, startBufferSource, stopBufferSource]);
+
+  const onSeek = useCallback((newPos) => {
+    if (source !== SRC_FILE || !decodedBufferRef.current) return;
+    const clamped = Math.max(0, Math.min(newPos, decodedBufferRef.current.duration));
+    setPosition(clamped);
+    if (playing) startBufferSource(clamped);
+  }, [playing, source, startBufferSource]);
+
+  // -- Tone-mode oscillator (sub-audible visual freqs scaled up to be heard) -
+  useEffect(() => {
+    // Tear down any tone oscillator if not in tone mode or not running
+    const teardown = () => {
+      if (oscRef.current) {
+        try { oscRef.current.stop(); } catch (e) {}
+        oscRef.current.disconnect();
+        oscRef.current = null;
+      }
+    };
+    if (source !== SRC_TONE || !running) { teardown(); return; }
+
+    // Only create an oscillator if the audio context exists already; we don't
+    // want to spawn a context on mount silently. ensureCtx is called when the
+    // user explicitly enables audio or loads a file. For visual-only tone
+    // testing we skip audio. (Visual loop runs from sampleAt regardless.)
+    if (!audioCtxRef.current) return;
+
+    const ctx = audioCtxRef.current;
+    const audibleFreq = (() => {
+      if (['noise', 'beat', 'sweep'].includes(tone.type)) return 220;
+      return Math.max(110, tone.freq * 55);
+    })();
+    const oscType = ['sine', 'square', 'sawtooth', 'triangle'].includes(tone.type)
+      ? tone.type : 'sine';
+    const osc = ctx.createOscillator();
+    osc.type = oscType;
+    osc.frequency.value = audibleFreq;
+    const g = ctx.createGain();
+    g.gain.value = 0.06;
+    osc.connect(g);
+    g.connect(analyserRef.current); // also route through analyser for consistency
+    osc.start();
+    oscRef.current = osc;
+    return teardown;
+  }, [source, running, tone]);
+
+  // -- Visual scroll loop ----------------------------------------------------
+  useEffect(() => {
+    if (!running) return;
+    let cancelled = false;
+    let lastTick = performance.now();
+    const startWall = lastTick;
+
+    const loop = (now) => {
+      if (cancelled) return;
+      if (now - lastTick >= FRAME_MS) {
+        lastTick = now;
+        let amp = 0;
+
+        if (source === SRC_FILE && analyserRef.current && playing) {
+          // Pull live time-domain data from the analyser. The buffer holds a
+          // recent slice of the signal; we want a single representative
+          // amplitude *and* an envelope (peak) for the meter.
+          const buf = analyserBufferRef.current;
+          analyserRef.current.getFloatTimeDomainData(buf);
+
+          // Sample average from the last ~SAMPLE_WINDOW samples, keeping sign.
+          // This preserves waveform polarity (so the trace oscillates above
+          // and below the centerline) instead of collapsing to zero from
+          // averaging a full symmetric oscillation.
+          const tail = Math.min(SAMPLE_WINDOW, buf.length);
+          let sum = 0;
+          for (let i = buf.length - tail; i < buf.length; i++) sum += buf[i];
+          const signed = sum / tail;
+
+          // Peak across the whole buffer for the amplitude meter
+          let peak = 0;
+          for (let i = 0; i < buf.length; i++) {
+            const ab = Math.abs(buf[i]);
+            if (ab > peak) peak = ab;
+          }
+
+          // Visual amplitude = signed value, scaled up so quiet tracks still
+          // produce visible deflection. Soft-clipped to [-1,1] via tanh feel.
+          amp = Math.max(-1, Math.min(1, signed * 2.4));
+          setPeakAmp(peak);
+
+          // Update playback position
+          const ctx = audioCtxRef.current;
+          if (ctx && decodedBufferRef.current) {
+            const elapsed = ctx.currentTime - playStartCtxTimeRef.current;
+            const p = Math.min(
+              playStartOffsetRef.current + elapsed,
+              decodedBufferRef.current.duration
+            );
+            setPosition(p);
+          }
+        } else if (source === SRC_TONE) {
+          // Generated test signal — average sub-samples across the column
+          const tSec = (now - startWall) / 1000;
+          const dt = FRAME_MS / 1000 / SAMPLE_WINDOW;
+          let sum = 0;
+          for (let i = 0; i < SAMPLE_WINDOW; i++) {
+            sum += sampleAt(tone, tSec + i * dt);
+          }
+          amp = sum / SAMPLE_WINDOW;
+          setPeakAmp(Math.abs(amp));
+        } else {
+          // File loaded but paused — bleed the trace down to silence
+          amp = 0;
+          setPeakAmp(0);
+        }
+
+        const newCol = renderColumn(ampToRow(amp));
+        const grid = gridRef.current;
+        for (let r = 0; r < ROWS; r++) {
+          const row = grid[r];
+          for (let c = 0; c < COLS - 1; c++) row[c] = row[c + 1];
+          row[COLS - 1] = newCol[r];
+        }
+        setTick((x) => x + 1);
+      }
+      requestAnimationFrame(loop);
+    };
+    requestAnimationFrame(loop);
+    return () => { cancelled = true; };
+  }, [running, source, tone, playing]);
+
+  // Reset grid on source/tone change
+  useEffect(() => {
+    gridRef.current = Array.from({ length: ROWS }, () => new Array(COLS).fill(' '));
+    setTick((x) => x + 1);
+  }, [source, toneId]);
+
+  // Inject scrubber CSS once
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    if (document.head.querySelector('[data-asr-scrub-style]')) return;
+    const style = document.createElement('style');
+    style.setAttribute('data-asr-scrub-style', '');
+    style.textContent = SCRUBBER_CSS;
+    document.head.appendChild(style);
+  }, []);
+
+  // -- Drag & drop handlers --------------------------------------------------
+  const [dragOver, setDragOver] = useState(false);
+  const onDrop = (e) => {
+    e.preventDefault();
+    setDragOver(false);
+    const f = e.dataTransfer?.files?.[0];
+    if (f) onFileChosen(f);
+  };
+
+  // Render display lines
+  const lines = gridRef.current.map((row) =>
+    row.map((ch) => (ch === ' ' ? '\u00a0' : ch)).join('')
+  );
+
+  // Numeric anchor: live amplitude as a 3-digit integer 000–999
+  const ampDigits = Math.round(Math.max(0, Math.min(1, peakAmp)) * 999)
+    .toString().padStart(3, '0');
+
+  return (
+    <div style={styles.page}>
+      <style>{globalCss}</style>
+      <div style={styles.grain} />
+
+      <div style={styles.frame}>
+        {/* HEADER REGISTER ----------------------------------------------- */}
+        <header style={styles.header}>
+          <div style={styles.headerLeft}>
+            <div style={styles.serial}>NO. ASR-10 / II</div>
+            <h1 style={styles.title}>
+              ASCII<br />
+              <span style={styles.titleItalic}>Spectrograph</span>
+            </h1>
+            <div style={styles.subtitle}>
+              Time-domain waveform plotting via character density.<br />
+              Ten-row register · {COLS}-column scroll · {Math.round(1000/FRAME_MS)} columns / sec.
+            </div>
+          </div>
+
+          <div style={styles.headerRight}>
+            <div style={styles.ampLabel}>AMPLITUDE</div>
+            <div style={styles.ampDigits}>
+              <span style={{
+                ...styles.ampDigitsValue,
+                color: peakAmp > 0.02 ? VERMILION : INK,
+              }}>{ampDigits}</span>
+              <span style={styles.ampUnit}>·10⁻³</span>
+            </div>
+            <div style={styles.ampMeter}>
+              <div style={{
+                ...styles.ampMeterFill,
+                width: `${Math.min(100, peakAmp * 120)}%`,
+              }} />
+            </div>
+          </div>
+        </header>
+
+        <hr style={styles.ruleThick} />
+
+        {/* SPECTROGRAPH PLATE -------------------------------------------- */}
+        <section style={styles.plateSection}>
+          <div style={styles.plateMargin}>
+            <div style={styles.plateMarginTop}>
+              <span>00</span><span>20</span><span>40</span><span>60</span>
+              <span>80</span><span>100</span>
+            </div>
+            <div style={styles.plate}>
+              <pre style={styles.screen} aria-label="ASCII waveform plate">
+                {lines.join('\n')}
+              </pre>
+            </div>
+            <div style={styles.plateMarginBottom}>
+              <span>← OLDER&nbsp;&nbsp;</span>
+              <span style={{ flex: 1, textAlign: 'center' }}>
+                FIG. 01 — TIME-DOMAIN TRACE
+              </span>
+              <span>&nbsp;&nbsp;NEWER →</span>
+            </div>
+          </div>
+        </section>
+
+        <hr style={styles.ruleThick} />
+
+        {/* LEDGER --------------------------------------------------------- */}
+        <section style={styles.ledger}>
+
+          {/* Source switcher */}
+          <div style={styles.ledgerCol}>
+            <div style={styles.ledgerLabel}>01 · SOURCE</div>
+            <div style={styles.segGroup}>
+              <button
+                onClick={() => setSource(SRC_TONE)}
+                style={{ ...styles.seg, ...(source === SRC_TONE ? styles.segOn : {}) }}
+              >TONE</button>
+              <button
+                onClick={() => setSource(SRC_FILE)}
+                style={{ ...styles.seg, ...(source === SRC_FILE ? styles.segOn : {}) }}
+                disabled={!decodedBufferRef.current}
+              >FILE</button>
+            </div>
+
+            {source === SRC_TONE && (
+              <div style={styles.toneList}>
+                {TONES.map((t) => (
+                  <button
+                    key={t.id}
+                    onClick={() => setToneId(t.id)}
+                    style={{
+                      ...styles.toneBtn,
+                      ...(t.id === toneId ? styles.toneBtnOn : {}),
+                    }}
+                  >
+                    <span style={styles.toneIdx}>
+                      {String(TONES.findIndex(x => x.id === t.id) + 1).padStart(2, '0')}
+                    </span>
+                    <span>{t.label}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* File ingestion */}
+          <div style={styles.ledgerCol}>
+            <div style={styles.ledgerLabel}>02 · INGEST</div>
+            <label
+              onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+              onDragLeave={() => setDragOver(false)}
+              onDrop={onDrop}
+              style={{
+                ...styles.dropZone,
+                ...(dragOver ? styles.dropZoneActive : {}),
+              }}
+            >
+              <input
+                type="file"
+                accept="audio/*,.mp3,.wav,.ogg,.m4a,.flac"
+                onChange={(e) => onFileChosen(e.target.files?.[0])}
+                style={styles.fileInput}
+              />
+              {loading ? (
+                <div style={styles.dropLoading}>DECODING…</div>
+              ) : fileName ? (
+                <>
+                  <div style={styles.dropFileName}>{fileName}</div>
+                  <div style={styles.dropMeta}>
+                    {formatTime(duration)} · {decodedBufferRef.current?.sampleRate || '—'} Hz
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div style={styles.dropHeadline}>DROP AUDIO FILE</div>
+                  <div style={styles.dropMeta}>or click to browse · mp3, wav, ogg, flac</div>
+                </>
+              )}
+            </label>
+            {errorMsg && <div style={styles.errorLine}>! {errorMsg}</div>}
+          </div>
+
+          {/* Transport */}
+          <div style={styles.ledgerCol}>
+            <div style={styles.ledgerLabel}>03 · TRANSPORT</div>
+            <div style={styles.transport}>
+              <button
+                onClick={togglePlay}
+                disabled={source !== SRC_FILE || !decodedBufferRef.current}
+                style={{
+                  ...styles.transportBtn,
+                  ...(playing ? styles.transportBtnOn : {}),
+                  ...((source !== SRC_FILE || !decodedBufferRef.current) ? styles.transportBtnDisabled : {}),
+                }}
+              >
+                {playing ? '◼ PAUSE' : '▶ PLAY'}
+              </button>
+              <button
+                onClick={() => setRunning((r) => !r)}
+                style={{ ...styles.transportBtn, ...(running ? styles.transportBtnOn : {}) }}
+              >
+                {running ? 'TRACE ON' : 'TRACE OFF'}
+              </button>
+            </div>
+            <div style={styles.timeRow}>
+              <span style={styles.timeNow}>{formatTime(position)}</span>
+              <span style={styles.timeSep}>/</span>
+              <span style={styles.timeTotal}>{formatTime(duration)}</span>
+            </div>
+            <input
+              type="range"
+              data-asr-scrub
+              min={0}
+              max={Math.max(0.01, duration)}
+              step={0.01}
+              value={position}
+              onChange={(e) => onSeek(parseFloat(e.target.value))}
+              disabled={source !== SRC_FILE || !duration}
+              style={styles.scrubber}
+            />
+          </div>
+
+          {/* Diagnostics */}
+          <div style={styles.ledgerCol}>
+            <div style={styles.ledgerLabel}>04 · DIAGNOSTIC</div>
+            <dl style={styles.diagList}>
+              <div style={styles.diagRow}>
+                <dt>Rows</dt><dd>{ROWS}</dd>
+              </div>
+              <div style={styles.diagRow}>
+                <dt>Cols</dt><dd>{COLS}</dd>
+              </div>
+              <div style={styles.diagRow}>
+                <dt>Frame</dt><dd>{FRAME_MS} ms</dd>
+              </div>
+              <div style={styles.diagRow}>
+                <dt>Tick</dt><dd>{tick.toString().padStart(6, '0')}</dd>
+              </div>
+              <div style={styles.diagRow}>
+                <dt>State</dt>
+                <dd>{
+                  source === SRC_FILE
+                    ? (playing ? 'PLAYBACK' : (decodedBufferRef.current ? 'CUED' : 'EMPTY'))
+                    : (running ? 'GENERATING' : 'HALTED')
+                }</dd>
+              </div>
+            </dl>
+          </div>
+        </section>
+
+        <hr style={styles.ruleThin} />
+
+        <footer style={styles.footer}>
+          <span>DENSITY MAP</span>
+          <span style={styles.legendCells}>
+            {RAMP.slice(0, 5).map((c, i) => (
+              <span key={i} style={styles.legendCell}>{c}</span>
+            ))}
+            <span style={styles.legendNote}>dense → sparse</span>
+          </span>
+          <span style={{ marginLeft: 'auto' }}>djz · waveform-as-typography · MMXXVI</span>
+        </footer>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
+// STYLE TOKENS
+// ----------------------------------------------------------------------------
+// Bone paper, ink, vermilion accent (used only on active live amplitude).
+// Three typefaces, each with a named formal role:
+//   - SPACE MONO 700      — numeric anchor (geometric monospace)
+//   - IBM PLEX SANS COND  — labels & body (rational, condensed)
+//   - JETBRAINS MONO      — ASCII glyph plate (fixed-pitch render grid)
+// 8px base, Fibonacci spacing, 1.333 type ratio.
+// ============================================================================
+
+const BONE     = '#f4f1ea';
+const BONE_2   = '#ebe6da';
+const BONE_3   = '#dfd8c6';
+const INK      = '#0e0e0c';
+const INK_60   = 'rgba(14,14,12,0.6)';
+const INK_40   = 'rgba(14,14,12,0.4)';
+const INK_20   = 'rgba(14,14,12,0.2)';
+const INK_10   = 'rgba(14,14,12,0.1)';
+const VERMILION = '#d8412f';
+
+const globalCss = `
+@import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=IBM+Plex+Sans+Condensed:wght@400;500;600;700&family=JetBrains+Mono:wght@400;700&display=swap');
+
+* { box-sizing: border-box; }
+
+input[type="range"].asr-scrub {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 2px;
+  background: ${INK_20};
+  outline: none;
+  cursor: pointer;
+}
+input[type="range"].asr-scrub::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  background: ${INK};
+  border-radius: 0;
+  cursor: pointer;
+}
+input[type="range"].asr-scrub::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  background: ${INK};
+  border: none;
+  border-radius: 0;
+  cursor: pointer;
+}
+input[type="range"].asr-scrub:disabled { opacity: 0.3; cursor: not-allowed; }
+
+@keyframes asr-fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+`;
+
+const styles = {
+  page: {
+    minHeight: '100vh',
+    background: BONE,
+    color: INK,
+    fontFamily: "'IBM Plex Sans Condensed', sans-serif",
+    padding: 'clamp(16px, 4vw, 80px) clamp(12px, 3vw, 56px)',
+    position: 'relative',
+    overflowX: 'hidden',
+  },
+  grain: {
+    position: 'fixed',
+    inset: 0,
+    pointerEvents: 'none',
+    opacity: 0.04,
+    mixBlendMode: 'multiply',
+    backgroundImage:
+      "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='280' height='280'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='280' height='280' filter='url(%23n)'/%3E%3C/svg%3E\")",
+    zIndex: 1,
+  },
+  frame: {
+    maxWidth: '1280px',
+    margin: '0 auto',
+    position: 'relative',
+    zIndex: 2,
+    animation: 'asr-fade-in 600ms ease-out',
+  },
+
+  // -- HEADER ---------------------------------------------------------------
+  header: {
+    display: 'grid',
+    gridTemplateColumns: 'minmax(0, 3fr) minmax(0, 4fr)', // asymmetric, weighted right
+    gap: '40px',
+    alignItems: 'flex-start',
+    paddingBottom: '24px',
+  },
+  headerLeft: {
+    paddingTop: '8px',
+  },
+  serial: {
+    fontFamily: "'Space Mono', monospace",
+    fontSize: '11px',
+    fontWeight: 700,
+    letterSpacing: '0.18em',
+    color: INK_60,
+    marginBottom: '24px',
+  },
+  title: {
+    margin: 0,
+    fontFamily: "'IBM Plex Sans Condensed', sans-serif",
+    fontWeight: 700,
+    fontSize: 'clamp(2.4rem, 5vw, 3.8rem)',
+    lineHeight: 0.92,
+    letterSpacing: '-0.02em',
+    color: INK,
+  },
+  titleItalic: {
+    fontStyle: 'italic',
+    fontWeight: 400,
+    color: INK_60,
+  },
+  subtitle: {
+    marginTop: '20px',
+    fontSize: '12.5px',
+    fontWeight: 400,
+    lineHeight: 1.55,
+    color: INK_60,
+    maxWidth: '36ch',
+  },
+
+  headerRight: {
+    textAlign: 'right',
+    paddingTop: '8px',
+  },
+  ampLabel: {
+    fontFamily: "'Space Mono', monospace",
+    fontSize: '10.5px',
+    fontWeight: 700,
+    letterSpacing: '0.22em',
+    color: INK_60,
+    marginBottom: '4px',
+  },
+  ampDigits: {
+    display: 'flex',
+    justifyContent: 'flex-end',
+    alignItems: 'baseline',
+    gap: '8px',
+    fontFamily: "'Space Mono', monospace",
+    lineHeight: 0.85,
+  },
+  ampDigitsValue: {
+    fontSize: 'clamp(4.5rem, 11vw, 7.5rem)',
+    fontWeight: 700,
+    letterSpacing: '-0.03em',
+    transition: 'color 80ms linear',
+    fontVariantNumeric: 'tabular-nums',
+  },
+  ampUnit: {
+    fontSize: '0.85rem',
+    fontWeight: 400,
+    color: INK_60,
+    letterSpacing: '0.04em',
+  },
+  ampMeter: {
+    height: '4px',
+    background: INK_10,
+    marginTop: '12px',
+    position: 'relative',
+  },
+  ampMeterFill: {
+    height: '100%',
+    background: VERMILION,
+    transition: 'width 60ms linear',
+  },
+
+  ruleThick: {
+    border: 'none',
+    height: '2px',
+    background: INK,
+    margin: '0 0 24px 0',
+  },
+  ruleThin: {
+    border: 'none',
+    height: '1px',
+    background: INK_20,
+    margin: '24px 0',
+  },
+
+  // -- PLATE ----------------------------------------------------------------
+  plateSection: {
+    marginBottom: '24px',
+  },
+  plateMargin: {
+    display: 'flex',
+    flexDirection: 'column',
+  },
+  plateMarginTop: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    fontFamily: "'Space Mono', monospace",
+    fontSize: '9px',
+    fontWeight: 400,
+    letterSpacing: '0.1em',
+    color: INK_40,
+    paddingBottom: '6px',
+    borderBottom: `1px solid ${INK_20}`,
+  },
+  plate: {
+    background: BONE_2,
+    padding: 'clamp(16px, 2.5vw, 32px) clamp(12px, 2vw, 24px)',
+    border: `1px solid ${INK_20}`,
+    borderTop: 'none',
+    borderBottom: 'none',
+    overflow: 'hidden',
+    position: 'relative',
+  },
+  screen: {
+    margin: 0,
+    fontFamily: "'JetBrains Mono', monospace",
+    fontWeight: 700,
+    fontSize: 'clamp(7px, 1vw, 12px)',
+    lineHeight: 1.1,
+    letterSpacing: '0.02em',
+    color: INK,
+    whiteSpace: 'pre',
+    overflow: 'hidden',
+  },
+  plateMarginBottom: {
+    display: 'flex',
+    fontFamily: "'Space Mono', monospace",
+    fontSize: '9px',
+    fontWeight: 700,
+    letterSpacing: '0.18em',
+    color: INK_40,
+    paddingTop: '6px',
+    borderTop: `1px solid ${INK_20}`,
+  },
+
+  // -- LEDGER ---------------------------------------------------------------
+  ledger: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+    gap: '32px 40px',
+    paddingTop: '8px',
+  },
+  ledgerCol: {
+    minWidth: 0,
+  },
+  ledgerLabel: {
+    fontFamily: "'Space Mono', monospace",
+    fontSize: '10.5px',
+    fontWeight: 700,
+    letterSpacing: '0.22em',
+    color: INK_60,
+    paddingBottom: '12px',
+    marginBottom: '16px',
+    borderBottom: `1px solid ${INK_20}`,
+  },
+
+  // segmented switcher
+  segGroup: {
+    display: 'flex',
+    gap: '0',
+    marginBottom: '16px',
+    border: `1px solid ${INK}`,
+    width: 'fit-content',
+  },
+  seg: {
+    background: 'transparent',
+    border: 'none',
+    fontFamily: "'Space Mono', monospace",
+    fontSize: '11px',
+    fontWeight: 700,
+    letterSpacing: '0.18em',
+    color: INK,
+    padding: '8px 16px',
+    cursor: 'pointer',
+    borderRight: `1px solid ${INK}`,
+  },
+  segOn: {
+    background: INK,
+    color: BONE,
+  },
+
+  // tone buttons
+  toneList: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '4px',
+  },
+  toneBtn: {
+    display: 'grid',
+    gridTemplateColumns: '32px 1fr',
+    alignItems: 'center',
+    gap: '12px',
+    background: 'transparent',
+    border: 'none',
+    borderTop: `1px solid ${INK_10}`,
+    color: INK,
+    fontFamily: "'IBM Plex Sans Condensed', sans-serif",
+    fontSize: '13px',
+    fontWeight: 500,
+    letterSpacing: '0.04em',
+    padding: '8px 0',
+    cursor: 'pointer',
+    textAlign: 'left',
+    transition: 'background 100ms ease-out',
+  },
+  toneBtnOn: {
+    background: INK,
+    color: BONE,
+    paddingLeft: '8px',
+    paddingRight: '8px',
+  },
+  toneIdx: {
+    fontFamily: "'Space Mono', monospace",
+    fontSize: '10px',
+    fontWeight: 700,
+    letterSpacing: '0.1em',
+    opacity: 0.6,
+  },
+
+  // file drop
+  dropZone: {
+    display: 'block',
+    position: 'relative',
+    padding: '24px 16px',
+    border: `1.5px dashed ${INK_40}`,
+    background: BONE_2,
+    cursor: 'pointer',
+    textAlign: 'center',
+    transition: 'border-color 120ms ease-out, background 120ms ease-out',
+  },
+  dropZoneActive: {
+    borderColor: INK,
+    background: BONE_3,
+  },
+  fileInput: {
+    position: 'absolute',
+    inset: 0,
+    opacity: 0,
+    cursor: 'pointer',
+  },
+  dropHeadline: {
+    fontFamily: "'Space Mono', monospace",
+    fontSize: '12px',
+    fontWeight: 700,
+    letterSpacing: '0.2em',
+    color: INK,
+    marginBottom: '6px',
+  },
+  dropFileName: {
+    fontFamily: "'IBM Plex Sans Condensed', sans-serif",
+    fontSize: '14px',
+    fontWeight: 600,
+    color: INK,
+    marginBottom: '4px',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+  },
+  dropMeta: {
+    fontFamily: "'Space Mono', monospace",
+    fontSize: '10px',
+    fontWeight: 400,
+    letterSpacing: '0.08em',
+    color: INK_60,
+  },
+  dropLoading: {
+    fontFamily: "'Space Mono', monospace",
+    fontSize: '12px',
+    fontWeight: 700,
+    letterSpacing: '0.22em',
+    color: VERMILION,
+  },
+  errorLine: {
+    marginTop: '8px',
+    fontFamily: "'Space Mono', monospace",
+    fontSize: '10px',
+    color: VERMILION,
+    letterSpacing: '0.1em',
+  },
+
+  // transport
+  transport: {
+    display: 'flex',
+    gap: '6px',
+    marginBottom: '16px',
+    flexWrap: 'wrap',
+  },
+  transportBtn: {
+    flex: '1 1 auto',
+    background: 'transparent',
+    border: `1px solid ${INK}`,
+    color: INK,
+    fontFamily: "'Space Mono', monospace",
+    fontSize: '11px',
+    fontWeight: 700,
+    letterSpacing: '0.18em',
+    padding: '10px 14px',
+    cursor: 'pointer',
+    transition: 'all 100ms ease-out',
+  },
+  transportBtnOn: {
+    background: INK,
+    color: BONE,
+  },
+  transportBtnDisabled: {
+    opacity: 0.3,
+    cursor: 'not-allowed',
+    borderColor: INK_40,
+  },
+  timeRow: {
+    display: 'flex',
+    alignItems: 'baseline',
+    gap: '8px',
+    fontFamily: "'Space Mono', monospace",
+    fontVariantNumeric: 'tabular-nums',
+    marginBottom: '8px',
+  },
+  timeNow: {
+    fontSize: '20px',
+    fontWeight: 700,
+    color: INK,
+    letterSpacing: '-0.01em',
+  },
+  timeSep: {
+    fontSize: '14px',
+    color: INK_40,
+  },
+  timeTotal: {
+    fontSize: '14px',
+    color: INK_60,
+  },
+  scrubber: {
+    width: '100%',
+  },
+
+  // diagnostics
+  diagList: {
+    margin: 0,
+    padding: 0,
+    fontFamily: "'Space Mono', monospace",
+    fontSize: '11.5px',
+    color: INK,
+  },
+  diagRow: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    padding: '6px 0',
+    borderBottom: `1px solid ${INK_10}`,
+    letterSpacing: '0.08em',
+    fontVariantNumeric: 'tabular-nums',
+  },
+
+  // footer
+  footer: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    gap: '16px',
+    fontFamily: "'Space Mono', monospace",
+    fontSize: '10px',
+    fontWeight: 400,
+    letterSpacing: '0.18em',
+    color: INK_60,
+    paddingTop: '8px',
+  },
+  legendCells: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '4px',
+  },
+  legendCell: {
+    fontFamily: "'JetBrains Mono', monospace",
+    fontWeight: 700,
+    color: INK,
+    width: '14px',
+    textAlign: 'center',
+  },
+  legendNote: {
+    marginLeft: '12px',
+    fontStyle: 'italic',
+    color: INK_40,
+  },
+};
+
+// Helper to inject scrubber CSS exactly once on mount.
+const SCRUBBER_CSS = `input[type="range"][data-asr-scrub]{-webkit-appearance:none;appearance:none;height:2px;background:${INK_20};outline:none;cursor:pointer;width:100%;}input[type="range"][data-asr-scrub]::-webkit-slider-thumb{-webkit-appearance:none;width:12px;height:12px;background:${INK};border-radius:0;cursor:pointer;}input[type="range"][data-asr-scrub]::-moz-range-thumb{width:12px;height:12px;background:${INK};border:none;border-radius:0;cursor:pointer;}input[type="range"][data-asr-scrub]:disabled{opacity:.3;cursor:not-allowed;}`;
+
+
+    // Mount the component, then dismiss the boot overlay.
+    const rootEl = document.getElementById('root');
+    const boot = document.getElementById('boot');
+    const root = ReactDOM.createRoot(rootEl);
+    root.render(<DjzAsciiSpectro />);
+    requestAnimationFrame(() => {
+      boot.classList.add('fade');
+      setTimeout(() => boot.remove(), 320);
+    });
+  </script>
+</body>
+</html>
