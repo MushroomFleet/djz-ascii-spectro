@@ -607,18 +607,55 @@ export default function DjzAsciiSpectro() {
 // 8px base, Fibonacci spacing, 1.333 type ratio.
 // ============================================================================
 
-const BONE     = '#f4f1ea';
-const BONE_2   = '#ebe6da';
-const BONE_3   = '#dfd8c6';
-const INK      = '#0e0e0c';
-const INK_60   = 'rgba(14,14,12,0.6)';
-const INK_40   = 'rgba(14,14,12,0.4)';
-const INK_20   = 'rgba(14,14,12,0.2)';
-const INK_10   = 'rgba(14,14,12,0.1)';
-const VERMILION = '#d8412f';
+// Color tokens. Each constant resolves to a CSS custom property, with the
+// hex/rgba value as a fallback so the component works standalone (no theme).
+// The `globalCss` block below defines the :root values for light mode and
+// the [data-theme="dark"] overrides for dark mode. A host page (e.g.
+// demo.html) toggles dark mode by setting data-theme="dark" on <html>.
+const BONE      = 'var(--asr-bone, #f4f1ea)';
+const BONE_2    = 'var(--asr-bone-2, #ebe6da)';
+const BONE_3    = 'var(--asr-bone-3, #dfd8c6)';
+const INK       = 'var(--asr-ink, #0e0e0c)';
+const INK_60    = 'var(--asr-ink-60, rgba(14,14,12,0.6))';
+const INK_40    = 'var(--asr-ink-40, rgba(14,14,12,0.4))';
+const INK_20    = 'var(--asr-ink-20, rgba(14,14,12,0.2))';
+const INK_10    = 'var(--asr-ink-10, rgba(14,14,12,0.1))';
+const VERMILION = 'var(--asr-vermilion, #d8412f)';
+const GRAIN_OPACITY = 'var(--asr-grain-opacity, 0.04)';
 
 const globalCss = `
 @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=IBM+Plex+Sans+Condensed:wght@400;500;600;700&family=JetBrains+Mono:wght@400;700&display=swap');
+
+/* Light theme — printed plate on bone paper. */
+:root {
+  --asr-bone: #f4f1ea;
+  --asr-bone-2: #ebe6da;
+  --asr-bone-3: #dfd8c6;
+  --asr-ink: #0e0e0c;
+  --asr-ink-60: rgba(14,14,12,0.6);
+  --asr-ink-40: rgba(14,14,12,0.4);
+  --asr-ink-20: rgba(14,14,12,0.2);
+  --asr-ink-10: rgba(14,14,12,0.1);
+  --asr-vermilion: #d8412f;
+  --asr-grain-opacity: 0.04;
+  --asr-grain-blend: multiply;
+}
+
+/* Dark theme — etched plate on graphite. Cool-shifted ink, warm-shifted
+   text. The plate goes recessed (darker than page) instead of raised. */
+[data-theme="dark"] {
+  --asr-bone: #16161a;
+  --asr-bone-2: #0d0d10;
+  --asr-bone-3: #1f1f24;
+  --asr-ink: #e8e4d8;
+  --asr-ink-60: rgba(232,228,216,0.62);
+  --asr-ink-40: rgba(232,228,216,0.4);
+  --asr-ink-20: rgba(232,228,216,0.18);
+  --asr-ink-10: rgba(232,228,216,0.08);
+  --asr-vermilion: #ff5a44;
+  --asr-grain-opacity: 0.03;
+  --asr-grain-blend: screen;
+}
 
 * { box-sizing: border-box; }
 
@@ -670,8 +707,8 @@ const styles = {
     position: 'fixed',
     inset: 0,
     pointerEvents: 'none',
-    opacity: 0.04,
-    mixBlendMode: 'multiply',
+    opacity: GRAIN_OPACITY,
+    mixBlendMode: 'var(--asr-grain-blend, multiply)',
     backgroundImage:
       "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='280' height='280'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='280' height='280' filter='url(%23n)'/%3E%3C/svg%3E\")",
     zIndex: 1,

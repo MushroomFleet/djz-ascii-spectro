@@ -7,17 +7,43 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <style>
+  /* Theme tokens for the page-level chrome (boot screen, theme toggle).
+     The component injects its own copies of these on mount; defining them
+     here too means the boot screen, scrollbar, and body background all
+     respect the theme before React loads. */
+  :root {
+    --pg-bone: #f4f1ea;
+    --pg-bone-2: #ebe6da;
+    --pg-ink: #0e0e0c;
+    --pg-ink-60: rgba(14,14,12,0.6);
+    --pg-ink-20: rgba(14,14,12,0.2);
+    --pg-vermilion: #d8412f;
+    color-scheme: light;
+  }
+  [data-theme="dark"] {
+    --pg-bone: #16161a;
+    --pg-bone-2: #0d0d10;
+    --pg-ink: #e8e4d8;
+    --pg-ink-60: rgba(232,228,216,0.62);
+    --pg-ink-20: rgba(232,228,216,0.18);
+    --pg-vermilion: #ff5a44;
+    color-scheme: dark;
+  }
+
   html, body {
     margin: 0;
     padding: 0;
-    background: #f4f1ea;
+    background: var(--pg-bone);
     min-height: 100%;
+    /* Smooth swap when the user flips the toggle */
+    transition: background-color 220ms ease-out;
   }
   body {
     font-family: 'IBM Plex Sans Condensed', -apple-system, sans-serif;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
   }
+
   /* Boot screen — appears while Babel compiles the JSX in-browser. */
   #boot {
     position: fixed;
@@ -27,8 +53,8 @@
     align-items: center;
     justify-content: center;
     gap: 16px;
-    background: #f4f1ea;
-    color: #0e0e0c;
+    background: var(--pg-bone);
+    color: var(--pg-ink);
     font-family: 'Space Mono', ui-monospace, Menlo, monospace;
     z-index: 9999;
     transition: opacity 280ms ease-out;
@@ -38,7 +64,7 @@
     font-size: 11px;
     letter-spacing: 0.22em;
     font-weight: 700;
-    color: rgba(14,14,12,0.6);
+    color: var(--pg-ink-60);
   }
   #boot .title {
     font-size: clamp(2rem, 5vw, 3rem);
@@ -50,12 +76,52 @@
     font-size: 11px;
     letter-spacing: 0.22em;
     font-weight: 700;
-    color: #d8412f;
+    color: var(--pg-vermilion);
   }
   #boot .rule {
     width: 200px;
     height: 2px;
-    background: #0e0e0c;
+    background: var(--pg-ink);
+  }
+
+  /* Theme toggle — fixed top-right, styled to match the instrument aesthetic.
+     Two segmented buttons; the active one inverts (ink fill, bone text). */
+  #theme-toggle {
+    position: fixed;
+    top: clamp(16px, 3vw, 32px);
+    right: clamp(16px, 3vw, 32px);
+    z-index: 1000;
+    display: flex;
+    border: 1px solid var(--pg-ink);
+    background: var(--pg-bone);
+    font-family: 'Space Mono', ui-monospace, Menlo, monospace;
+    transition: background-color 220ms ease-out, border-color 220ms ease-out;
+  }
+  #theme-toggle button {
+    background: transparent;
+    border: none;
+    color: var(--pg-ink);
+    font-family: inherit;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.18em;
+    padding: 8px 12px;
+    cursor: pointer;
+    border-right: 1px solid var(--pg-ink);
+    transition: background-color 120ms ease-out, color 120ms ease-out;
+  }
+  #theme-toggle button:last-child { border-right: none; }
+  #theme-toggle button[aria-pressed="true"] {
+    background: var(--pg-ink);
+    color: var(--pg-bone);
+  }
+  #theme-toggle button:focus-visible {
+    outline: 2px solid var(--pg-vermilion);
+    outline-offset: 2px;
+  }
+  /* On narrow screens shrink the toggle */
+  @media (max-width: 480px) {
+    #theme-toggle button { padding: 6px 8px; font-size: 9px; letter-spacing: 0.14em; }
   }
 </style>
 </head>
@@ -66,7 +132,58 @@
     <div class="title">ASCII Spectrograph</div>
     <div class="status">COMPILING…</div>
   </div>
+
+  <div id="theme-toggle" role="group" aria-label="Theme">
+    <button type="button" data-theme-set="light" aria-pressed="true">LIGHT</button>
+    <button type="button" data-theme-set="dark"  aria-pressed="false">DARK</button>
+  </div>
+
   <div id="root"></div>
+
+  <!-- Theme bootstrap. Runs before React/Babel so initial paint is correct
+       and the boot screen never flashes the wrong theme. -->
+  <script>
+    (function () {
+      var KEY = 'djz-asr-theme';
+      var saved;
+      try { saved = localStorage.getItem(KEY); } catch (e) { saved = null; }
+      var initial = saved;
+      if (!initial) {
+        // Respect OS preference on first load
+        initial = (window.matchMedia &&
+          window.matchMedia('(prefers-color-scheme: dark)').matches)
+          ? 'dark' : 'light';
+      }
+      applyTheme(initial);
+
+      function applyTheme(theme) {
+        if (theme === 'dark') {
+          document.documentElement.setAttribute('data-theme', 'dark');
+        } else {
+          document.documentElement.removeAttribute('data-theme');
+        }
+        // Update toggle button states (toggle exists in DOM by the time
+        // this script runs because it's defined above in the body)
+        var btns = document.querySelectorAll('#theme-toggle button');
+        for (var i = 0; i < btns.length; i++) {
+          var t = btns[i].getAttribute('data-theme-set');
+          btns[i].setAttribute('aria-pressed', t === theme ? 'true' : 'false');
+        }
+      }
+
+      // Wire up clicks
+      document.addEventListener('click', function (e) {
+        var btn = e.target.closest('#theme-toggle button');
+        if (!btn) return;
+        var t = btn.getAttribute('data-theme-set');
+        applyTheme(t);
+        try { localStorage.setItem(KEY, t); } catch (err) {}
+      });
+
+      // Expose for debugging
+      window.__setTheme = applyTheme;
+    })();
+  </script>
 
   <!-- React 18 + Babel Standalone (cdnjs is whitelisted) -->
   <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
@@ -684,18 +801,55 @@ function DjzAsciiSpectro() {
 // 8px base, Fibonacci spacing, 1.333 type ratio.
 // ============================================================================
 
-const BONE     = '#f4f1ea';
-const BONE_2   = '#ebe6da';
-const BONE_3   = '#dfd8c6';
-const INK      = '#0e0e0c';
-const INK_60   = 'rgba(14,14,12,0.6)';
-const INK_40   = 'rgba(14,14,12,0.4)';
-const INK_20   = 'rgba(14,14,12,0.2)';
-const INK_10   = 'rgba(14,14,12,0.1)';
-const VERMILION = '#d8412f';
+// Color tokens. Each constant resolves to a CSS custom property, with the
+// hex/rgba value as a fallback so the component works standalone (no theme).
+// The `globalCss` block below defines the :root values for light mode and
+// the [data-theme="dark"] overrides for dark mode. A host page (e.g.
+// demo.html) toggles dark mode by setting data-theme="dark" on <html>.
+const BONE      = 'var(--asr-bone, #f4f1ea)';
+const BONE_2    = 'var(--asr-bone-2, #ebe6da)';
+const BONE_3    = 'var(--asr-bone-3, #dfd8c6)';
+const INK       = 'var(--asr-ink, #0e0e0c)';
+const INK_60    = 'var(--asr-ink-60, rgba(14,14,12,0.6))';
+const INK_40    = 'var(--asr-ink-40, rgba(14,14,12,0.4))';
+const INK_20    = 'var(--asr-ink-20, rgba(14,14,12,0.2))';
+const INK_10    = 'var(--asr-ink-10, rgba(14,14,12,0.1))';
+const VERMILION = 'var(--asr-vermilion, #d8412f)';
+const GRAIN_OPACITY = 'var(--asr-grain-opacity, 0.04)';
 
 const globalCss = `
 @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=IBM+Plex+Sans+Condensed:wght@400;500;600;700&family=JetBrains+Mono:wght@400;700&display=swap');
+
+/* Light theme — printed plate on bone paper. */
+:root {
+  --asr-bone: #f4f1ea;
+  --asr-bone-2: #ebe6da;
+  --asr-bone-3: #dfd8c6;
+  --asr-ink: #0e0e0c;
+  --asr-ink-60: rgba(14,14,12,0.6);
+  --asr-ink-40: rgba(14,14,12,0.4);
+  --asr-ink-20: rgba(14,14,12,0.2);
+  --asr-ink-10: rgba(14,14,12,0.1);
+  --asr-vermilion: #d8412f;
+  --asr-grain-opacity: 0.04;
+  --asr-grain-blend: multiply;
+}
+
+/* Dark theme — etched plate on graphite. Cool-shifted ink, warm-shifted
+   text. The plate goes recessed (darker than page) instead of raised. */
+[data-theme="dark"] {
+  --asr-bone: #16161a;
+  --asr-bone-2: #0d0d10;
+  --asr-bone-3: #1f1f24;
+  --asr-ink: #e8e4d8;
+  --asr-ink-60: rgba(232,228,216,0.62);
+  --asr-ink-40: rgba(232,228,216,0.4);
+  --asr-ink-20: rgba(232,228,216,0.18);
+  --asr-ink-10: rgba(232,228,216,0.08);
+  --asr-vermilion: #ff5a44;
+  --asr-grain-opacity: 0.03;
+  --asr-grain-blend: screen;
+}
 
 * { box-sizing: border-box; }
 
@@ -747,8 +901,8 @@ const styles = {
     position: 'fixed',
     inset: 0,
     pointerEvents: 'none',
-    opacity: 0.04,
-    mixBlendMode: 'multiply',
+    opacity: GRAIN_OPACITY,
+    mixBlendMode: 'var(--asr-grain-blend, multiply)',
     backgroundImage:
       "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='280' height='280'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='280' height='280' filter='url(%23n)'/%3E%3C/svg%3E\")",
     zIndex: 1,
