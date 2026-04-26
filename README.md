@@ -12,6 +12,8 @@ Drop in an MP3, WAV, OGG, or FLAC and watch the music print itself across a type
 
 The fastest way to see the component in action is the bundled standalone demo:
 
+WEB DEMO: [https://scuffedepoch.com/ascii-spectro/](https://scuffedepoch.com/ascii-spectro/)
+
 1. Clone or download this repo.
 2. Open `demo.html` directly in any modern browser.
 3. Drag an audio file onto the **INGEST** zone, hit **▶ PLAY**.
